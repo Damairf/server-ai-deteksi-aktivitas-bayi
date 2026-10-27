@@ -64,7 +64,7 @@ class AudioCNN(nn.Module):
 image = (
     modal.Image.debian_slim()
     .env({"YOLO_CONFIG_DIR": "/tmp"})
-    .apt_install("libgl1-mesa-glx", "libglib2.0-0")
+    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "ffmpeg")
     .pip_install(
         "ultralytics",
         "opencv-python-headless",
@@ -74,7 +74,8 @@ image = (
         "httpx",
         "torch",
         "librosa",
-        "soundfile"
+        "soundfile",
+        "pydub"
     )
     .add_local_file("best_aktivitas.pt", remote_path="/root/best_aktivitas.pt")
     .add_local_file("best_bantal.pt", remote_path="/root/best_bantal.pt")
@@ -198,9 +199,40 @@ class EnsembleModelRunner:
 
     @modal.method()
     def predict_audio(self, audio_bytes: bytes):
-        audio_buf = io.BytesIO(audio_bytes)
-        y, sr = librosa.load(audio_buf, sr=SAMPLE_RATE, duration=DURATION)
-        
+        import soundfile as sf
+        from pydub import AudioSegment
+
+        try:
+            audio_buf = io.BytesIO(audio_bytes)
+            audio_buf.seek(0)
+
+            try:
+                y, sr = librosa.load(audio_buf, sr=SAMPLE_RATE, duration=DURATION)
+            except Exception:
+                try:
+                    audio_buf.seek(0)
+                    seg = AudioSegment.from_file(audio_buf)
+                    seg = seg.set_frame_rate(SAMPLE_RATE).set_channels(1)
+                    
+                    samples = np.array(seg.get_array_of_samples(), dtype=np.float32)
+                    if seg.sample_width == 2:
+                        samples /= 32768.0
+                    elif seg.sample_width == 4:
+                        samples /= 2147483648.0
+                    
+                    y = samples
+                    sr = SAMPLE_RATE
+                except Exception:
+                    audio_buf.seek(0)
+                    y, sr = sf.read(audio_buf)
+                    if len(y.shape) > 1:
+                        y = np.mean(y, axis=1)
+                    if sr != SAMPLE_RATE:
+                        y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE)
+
+        except Exception as err:
+            raise ValueError(f"Berkas audio tidak dapat di-decode: {str(err)}")
+
         target_len = SAMPLE_RATE * DURATION
         if len(y) < target_len:
             y = np.pad(y, (0, target_len - len(y)), mode='constant')
@@ -226,7 +258,6 @@ class EnsembleModelRunner:
 
         category = AUDIO_CLASSES[pred_idx.item()]
         score = round(float(conf.cpu().numpy()[0]), 2)
-        
         is_crying = category in ["hungry", "pain", "discomfort"]
 
         return {
@@ -234,7 +265,6 @@ class EnsembleModelRunner:
             "category": category if is_crying else None,
             "confidence": score
         }
-
 
 async def send_callback(payload: dict, callback_url: str):
     try:
