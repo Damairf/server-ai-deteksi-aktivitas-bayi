@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import modal
 
-# === KONFIGURASI URL BACKEND DEVELOPER ===
+# KONFIGURASI URL BACKEND
 BACKEND_CALLBACK_VISION_URL = "https://capstone-diponeocare-production.up.railway.app/api/ai/results/vision"
 BACKEND_CALLBACK_AUDIO_URL = "https://capstone-diponeocare-production.up.railway.app/api/ai/results/audio"
 
@@ -144,9 +144,8 @@ class EnsembleModelRunner:
                 awake = True
             elif label in ["crying", "menangis"]:
                 visual_crying = True
-                awake = True  # PENTING: Saat menangis, atur awake=True agar sleeping + awake == 1
+                awake = True
 
-        # Jika tidak ada aktivitas terdeteksi dari YOLO, default ke awake=True agar validasi (sleeping + awake == 1) tetap lolos
         if not sleeping and not awake:
             awake = True
             if akt_conf == 0.0:
@@ -162,7 +161,6 @@ class EnsembleModelRunner:
             elif cls_name in ["baby-face", "muka-bayi", "muka_bayi"]:
                 baby_face_detected = True
 
-        # VALIDASI ANOMALY TYPE SESUAI ENUM BACKEND: ["bantal", "guling", "mainan"]
         detected_anomaly_type = None
 
         if len(res_bnt[0].boxes) > 0:
@@ -184,7 +182,6 @@ class EnsembleModelRunner:
             anomaly_detected = True
             anomaly_conf = 0.85
 
-        # PENTING: Jika detected == False, type WAJIB None (null di JSON)
         final_anomaly_type = detected_anomaly_type if anomaly_detected else None
 
         return {
@@ -230,12 +227,11 @@ class EnsembleModelRunner:
         category = AUDIO_CLASSES[pred_idx.item()]
         score = round(float(conf.cpu().numpy()[0]), 2)
         
-        # isCrying hanya True jika kategori terdeteksi hungry, pain, atau discomfort
         is_crying = category in ["hungry", "pain", "discomfort"]
 
         return {
             "isCrying": is_crying,
-            "category": category if is_crying else None, # WAJIB None jika is_crying == False
+            "category": category if is_crying else None,
             "confidence": score
         }
 
@@ -288,7 +284,7 @@ async def predict_visual(
             },
             "anomaly": {
                 "detected": bool(vision_res["anomaly"]["detected"]),
-                "type": vision_res["anomaly"]["type"],  # Nilai string valid ("bantal"/"guling"/"mainan") atau None
+                "type": vision_res["anomaly"]["type"],
                 "confidence": float(vision_res["anomaly"]["confidence"])
             }
         }
@@ -346,8 +342,10 @@ async def predict_audio(
         audio_res = await runner.predict_audio.remote.aio(contents)
 
         is_crying = bool(audio_res["isCrying"])
-        crying_cls = audio_res["category"]  # None jika is_crying == False
-        crying_cls_conf = float(audio_res["confidence"]) if is_crying else None
+
+        crying_cls = audio_res["category"] if is_crying else None
+
+        crying_cls_conf = float(audio_res["confidence"]) if is_crying else 0.0
 
         results_array = [
             {
@@ -366,16 +364,16 @@ async def predict_audio(
             "results": results_array
         }
 
+        background_tasks.add_task(send_callback, audio_payload, BACKEND_CALLBACK_AUDIO_URL)
+
         if is_crying:
-            background_tasks.add_task(send_callback, audio_payload, BACKEND_CALLBACK_AUDIO_URL)
-            
             confirmed_visual_payload = {
                 "macAddress": str(macAddress),
                 "captureId": str(cap_id),
                 "timestamp": str(saved_timestamp),
                 "activity": {
                     "sleeping": False,
-                    "awake": True,  # 0 + 1 = 1 (Memenuhi syarat validasi backend)
+                    "awake": True,
                     "confidence": visual_confidence
                 },
                 "visualCrying": {
@@ -393,7 +391,7 @@ async def predict_audio(
                 "timestamp": str(saved_timestamp),
                 "activity": {
                     "sleeping": False,
-                    "awake": True,  # 0 + 1 = 1 (Memenuhi syarat validasi backend)
+                    "awake": True,
                     "confidence": 0.85
                 },
                 "visualCrying": {
@@ -412,7 +410,6 @@ async def predict_audio(
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Gagal memproses audio: {str(e)}")
-
 
 @app.function(image=image)
 @modal.asgi_app()
